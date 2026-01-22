@@ -26,3 +26,15 @@ CREATE TABLE IF NOT EXISTS videos (
   editor_override BOOLEAN NOT NULL DEFAULT FALSE,
   is_fetching BOOLEAN NOT NULL DEFAULT FALSE
 );
+
+CREATE TABLE IF NOT EXISTS editor_groups (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS group_editors (
+  group_id UUID REFERENCES editor_groups(id) ON DELETE CASCADE,
+  editor TEXT NOT NULL,
+  PRIMARY KEY (group_id, editor)
+);

@@ -51,7 +51,7 @@ const fetchAccountVideoUrls = async ({ token, platform, handle, profileUrl }) =>
           includeDownloadedVideo: false,
           includeSharesCount: false,
           includeTranscript: false,
-          resultsLimit: 10,
+          resultsLimit: 500,
           skipPinnedPosts: false,
           username: [handle]
         })
@@ -67,7 +67,7 @@ const fetchAccountVideoUrls = async ({ token, platform, handle, profileUrl }) =>
           excludePinnedPosts: false,
           profileScrapeSections: ['videos'],
           profiles: [profileUrl],
-          resultsPerPage: 100,
+          resultsPerPage: 500,
           shouldDownloadAvatars: false,
           shouldDownloadCovers: false,
           shouldDownloadSlideshowImages: false,

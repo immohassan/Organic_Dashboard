@@ -61,7 +61,7 @@ const detectVideoPlatform = (url) => {
 const extractInstagramStats = (items) => {
   if (!Array.isArray(items) || items.length === 0) return { views: null, postedDate: '' };
   const item = items[0];
-  const viewsRaw = item.video_view_count ?? item.video_play_count ?? item.playCount ?? null;
+  const viewsRaw = item.video_play_count ?? item.video_view_count ?? item.playCount ?? null;
   const views = viewsRaw !== null ? parseInt(`${viewsRaw}`.replace(/,/g, ''), 10) : null;
   const postedDateRaw = item.date_posted ?? item.timestamp ?? '';
   const postedDate = postedDateRaw ? new Date(postedDateRaw).toISOString().split('T')[0] : '';
@@ -144,7 +144,7 @@ const fetchAccountVideoUrls = async ({ token, platform, handle, profileUrl }) =>
           includeDownloadedVideo: false,
           includeSharesCount: false,
           includeTranscript: false,
-          resultsLimit: 50,
+          resultsLimit: 500,
           skipPinnedPosts: false,
           username: [handle]
         })
@@ -160,7 +160,7 @@ const fetchAccountVideoUrls = async ({ token, platform, handle, profileUrl }) =>
           excludePinnedPosts: false,
           profileScrapeSections: ['videos'],
           profiles: [profileUrl],
-          resultsPerPage: 50,
+          resultsPerPage: 500,
           shouldDownloadAvatars: false,
           shouldDownloadCovers: false,
           shouldDownloadSlideshowImages: false,
@@ -284,6 +284,7 @@ export default function App() {
   const [state, setState] = useState({
     accounts: [],
     videos: [],
+    groups: [],
     settings: { lastUpdated: '' },
     dateFilter: 'all',
     customDateStart: '',
@@ -314,6 +315,12 @@ export default function App() {
     editingVideoEditorName: '',
     editingAccountId: null,
     editingAccountEditor: '',
+    showGroupsManager: false,
+    editingGroupId: null,
+    editingGroupName: '',
+    newGroupName: '',
+    showAddGroup: false,
+    selectedGroupId: null,
     toast: null
   });
 
@@ -328,21 +335,25 @@ export default function App() {
   useEffect(() => {
     const load = async () => {
       try {
-        const [settingsRes, accountsRes, videosRes] = await Promise.all([
+        const [settingsRes, accountsRes, videosRes, groupsRes] = await Promise.all([
           fetch(`${API_BASE}/api/settings`),
           fetch(`${API_BASE}/api/accounts`),
-          fetch(`${API_BASE}/api/videos`)
+          fetch(`${API_BASE}/api/videos`),
+          fetch(`${API_BASE}/api/groups`)
         ]);
         const settingsData = await settingsRes.json();
         const accountsData = await accountsRes.json();
         const videosData = await videosRes.json();
+        const groupsData = await groupsRes.json();
         const settings = settingsData && typeof settingsData === 'object' ? settingsData : { lastUpdated: '' };
         const accounts = Array.isArray(accountsData) ? accountsData : [];
         const videos = Array.isArray(videosData) ? videosData : [];
+        const groups = Array.isArray(groupsData) ? groupsData : [];
         updateState({
           settings,
           accounts,
-          videos
+          videos,
+          groups
         });
       } catch (e) {
         alert('Failed to load data from API.');
@@ -423,17 +434,33 @@ export default function App() {
     });
   }, [state.videos, state.dateFilter, state.customDays, state.customDateStart]);
 
+  // Helper function to map editor to group name
+  const getGroupForEditor = useMemo(() => {
+    const editorToGroup = {};
+    state.groups.forEach((group) => {
+      if (Array.isArray(group.editors)) {
+        group.editors.forEach((e) => {
+          if (e && e.editor) {
+            editorToGroup[e.editor] = group.name;
+          }
+        });
+      }
+    });
+    return (editor) => editorToGroup[editor] || editor;
+  }, [state.groups]);
+
   const aggregate = useMemo(() => {
     let filtered = dateFilteredVideos;
     if (state.platformFilter !== 'all') {
       filtered = filtered.filter((v) => v.platform === state.platformFilter);
     }
-    const editorTotals = {};
+    const groupTotals = {};
     filtered.forEach((video) => {
       if (!video.editor) return;
-      if (!editorTotals[video.editor]) {
-        editorTotals[video.editor] = {
-          editor: video.editor,
+      const groupName = getGroupForEditor(video.editor);
+      if (!groupTotals[groupName]) {
+        groupTotals[groupName] = {
+          group: groupName,
           instagramViews: 0,
           tiktokViews: 0,
           totalViews: 0,
@@ -441,15 +468,15 @@ export default function App() {
         };
       }
       if (video.platform === 'Instagram') {
-        editorTotals[video.editor].instagramViews += video.views || 0;
+        groupTotals[groupName].instagramViews += video.views || 0;
       } else if (video.platform === 'TikTok') {
-        editorTotals[video.editor].tiktokViews += video.views || 0;
+        groupTotals[groupName].tiktokViews += video.views || 0;
       }
-      editorTotals[video.editor].totalViews += video.views || 0;
-      editorTotals[video.editor].videoCount += 1;
+      groupTotals[groupName].totalViews += video.views || 0;
+      groupTotals[groupName].videoCount += 1;
     });
-    return Object.values(editorTotals).sort((a, b) => b.totalViews - a.totalViews);
-  }, [dateFilteredVideos, state.platformFilter]);
+    return Object.values(groupTotals).sort((a, b) => b.totalViews - a.totalViews);
+  }, [dateFilteredVideos, state.platformFilter, getGroupForEditor]);
 
   const selectedAccount = useMemo(() => {
     return state.accounts.find((account) => account.id === state.selectedAccountId) || null;
@@ -462,12 +489,13 @@ export default function App() {
 
   const accountAggregate = useMemo(() => {
     if (!accountVideos.length) return [];
-    const editorTotals = {};
+    const groupTotals = {};
     accountVideos.forEach((video) => {
       if (!video.editor) return;
-      if (!editorTotals[video.editor]) {
-        editorTotals[video.editor] = {
-          editor: video.editor,
+      const groupName = getGroupForEditor(video.editor);
+      if (!groupTotals[groupName]) {
+        groupTotals[groupName] = {
+          group: groupName,
           instagramViews: 0,
           tiktokViews: 0,
           totalViews: 0,
@@ -475,15 +503,15 @@ export default function App() {
         };
       }
       if (video.platform === 'Instagram') {
-        editorTotals[video.editor].instagramViews += video.views || 0;
+        groupTotals[groupName].instagramViews += video.views || 0;
       } else if (video.platform === 'TikTok') {
-        editorTotals[video.editor].tiktokViews += video.views || 0;
+        groupTotals[groupName].tiktokViews += video.views || 0;
       }
-      editorTotals[video.editor].totalViews += video.views || 0;
-      editorTotals[video.editor].videoCount += 1;
+      groupTotals[groupName].totalViews += video.views || 0;
+      groupTotals[groupName].videoCount += 1;
     });
-    return Object.values(editorTotals).sort((a, b) => b.totalViews - a.totalViews);
-  }, [accountVideos]);
+    return Object.values(groupTotals).sort((a, b) => b.totalViews - a.totalViews);
+  }, [accountVideos, getGroupForEditor]);
 
   const filteredVideos = useMemo(() => {
     let result = dateFilteredVideos;
@@ -960,7 +988,10 @@ export default function App() {
       });
       const accountsRes = await fetch(`${API_BASE}/api/accounts`);
       const accounts = await accountsRes.json();
-      updateState({ accounts });
+      // Also refetch videos to update editor names in the videos section
+      const videosRes = await fetch(`${API_BASE}/api/videos`);
+      const videos = await videosRes.json();
+      updateState({ accounts, videos });
       updateState({ editingAccountId: null, editingAccountEditor: '' });
     } catch (e) {
       alert('Save account editor failed. Check API connection.');
@@ -974,8 +1005,109 @@ export default function App() {
       editingVideoEditor: null,
       editingVideoEditorName: '',
       editingAccountId: null,
-      editingAccountEditor: ''
+      editingAccountEditor: '',
+      editingGroupId: null,
+      editingGroupName: '',
+      selectedGroupId: null
     });
+  };
+
+  const handleAddGroup = async () => {
+    const name = state.newGroupName.trim();
+    if (!name) {
+      alert('Please enter a group name');
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/groups`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      if (!res.ok) {
+        const error = await res.json();
+        alert(error.error || 'Failed to create group');
+        return;
+      }
+      const groupsRes = await fetch(`${API_BASE}/api/groups`);
+      const groups = await groupsRes.json();
+      updateState({ groups, newGroupName: '', showAddGroup: false });
+    } catch (e) {
+      alert('Failed to create group. Check API connection.');
+    }
+  };
+
+  const handleEditGroup = (groupId) => {
+    const group = state.groups.find((g) => g.id === groupId);
+    if (!group) return;
+    updateState({ editingGroupId: groupId, editingGroupName: group.name });
+  };
+
+  const handleSaveGroup = async (groupId) => {
+    const name = state.editingGroupName.trim();
+    if (!name) {
+      alert('Please enter a group name');
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/groups/${groupId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      if (!res.ok) {
+        const error = await res.json();
+        alert(error.error || 'Failed to update group');
+        return;
+      }
+      const groupsRes = await fetch(`${API_BASE}/api/groups`);
+      const groups = await groupsRes.json();
+      updateState({ groups, editingGroupId: null, editingGroupName: '' });
+    } catch (e) {
+      alert('Failed to update group. Check API connection.');
+    }
+  };
+
+  const handleDeleteGroup = async (groupId) => {
+    if (!confirm('Are you sure you want to delete this group? This will not delete the editors, only the group.')) {
+      return;
+    }
+    try {
+      await fetch(`${API_BASE}/api/groups/${groupId}`, { method: 'DELETE' });
+      const groupsRes = await fetch(`${API_BASE}/api/groups`);
+      const groups = await groupsRes.json();
+      updateState({ groups, selectedGroupId: null });
+    } catch (e) {
+      alert('Failed to delete group. Check API connection.');
+    }
+  };
+
+  const handleAddEditorToGroup = async (groupId, editorName) => {
+    try {
+      await fetch(`${API_BASE}/api/groups/${groupId}/editors`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ editor: editorName.trim() })
+      });
+      const groupsRes = await fetch(`${API_BASE}/api/groups`);
+      const groups = await groupsRes.json();
+      updateState({ groups });
+    } catch (e) {
+      alert('Failed to add editor to group. Check API connection.');
+    }
+  };
+
+  const handleRemoveEditorFromGroup = async (groupId, editorName) => {
+    try {
+      await fetch(`${API_BASE}/api/groups/${groupId}/editors?editor=${encodeURIComponent(editorName)}`, {
+        method: 'DELETE'
+      });
+      const groupsRes = await fetch(`${API_BASE}/api/groups`);
+      const groups = await groupsRes.json();
+      updateState({ groups });
+    } catch (e) {
+      alert('Failed to remove editor from group. Check API connection.');
+    }
   };
 
   const handleLogin = async () => {
@@ -1353,7 +1485,7 @@ export default function App() {
 
         <div className="bg-white rounded-xl border border-gray-200 p-4 sm:p-6 mb-6">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-base sm:text-lg font-semibold text-gray-900">Views by Editor</h2>
+            <h2 className="text-base sm:text-lg font-semibold text-gray-900">Views by Group</h2>
             <div className="flex items-center gap-4 text-xs sm:text-sm text-gray-500">
               <div className="flex items-center gap-1">
                 <span className="w-3 h-3 bg-pink-500 rounded" />
@@ -1369,7 +1501,7 @@ export default function App() {
           <div className="bar-chart">
             {aggregate.length > 0 ? (
               aggregate.map((e) => (
-                <div className="bar-container" key={e.editor}>
+                <div className="bar-container" key={e.group}>
                   <div className="flex items-end gap-1 justify-center">
                     <div className="relative" style={{ width: 'clamp(18px, 4vw, 32px)' }}>
                       <div
@@ -1395,9 +1527,9 @@ export default function App() {
                     </div>
                   </div>
                   <div className="editor-avatar bg-gradient-to-br from-violet-100 to-violet-200 rounded-lg border-2 border-violet-400 flex items-center justify-center overflow-hidden">
-                    <span className="font-bold text-violet-600">{e.editor.charAt(0)}</span>
+                    <span className="font-bold text-violet-600">{e.group.charAt(0)}</span>
                   </div>
-                  <span className="bar-name">{e.editor}</span>
+                  <span className="bar-name">{e.group}</span>
                 </div>
               ))
             ) : (
@@ -1721,7 +1853,7 @@ export default function App() {
 
             <div className="p-4 sm:p-6 border-b border-gray-200">
               <div className="flex items-center justify-between mb-4">
-                <h3 className="text-base sm:text-lg font-semibold text-gray-900">Views by Editor</h3>
+                <h3 className="text-base sm:text-lg font-semibold text-gray-900">Views by Group</h3>
                 <div className="flex items-center gap-4 text-xs sm:text-sm text-gray-500">
                   <div className="flex items-center gap-1">
                     <span className="w-3 h-3 bg-pink-500 rounded"></span>
@@ -1737,7 +1869,7 @@ export default function App() {
               <div className="bar-chart">
                 {accountAggregate.length > 0 ? (
                   accountAggregate.map((e) => (
-                    <div className="bar-container" key={e.editor}>
+                    <div className="bar-container" key={e.group}>
                       <div className="flex items-end gap-1 justify-center">
                         <div className="relative" style={{ width: 'clamp(18px, 4vw, 32px)' }}>
                           <div
@@ -1763,9 +1895,9 @@ export default function App() {
                         </div>
                       </div>
                       <div className="editor-avatar bg-gradient-to-br from-violet-100 to-violet-200 rounded-lg border-2 border-violet-400 flex items-center justify-center overflow-hidden">
-                        <span className="font-bold text-violet-600">{e.editor.charAt(0)}</span>
+                        <span className="font-bold text-violet-600">{e.group.charAt(0)}</span>
                       </div>
-                      <span className="bar-name">{e.editor}</span>
+                      <span className="bar-name">{e.group}</span>
                     </div>
                   ))
                 ) : (
@@ -1984,6 +2116,194 @@ export default function App() {
                         </tr>
                       );
                     })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        ) : null}
+
+        {state.isManager && (state.activeTab === 'home' || state.activeTab === 'accounts') ? (
+          <div className="bg-white rounded-xl border border-gray-200 mt-5">
+            <div className="p-3 sm:p-4 border-b border-gray-200">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-base sm:text-lg font-semibold text-gray-900">Editor Groups</h2>
+                  <p className="text-xs text-gray-500">
+                    Create groups to combine multiple editors. Charts will show views grouped by these groups instead of individual editors.
+                  </p>
+                </div>
+                <button
+                  onClick={() => updateState({ showAddGroup: !state.showAddGroup })}
+                  className="flex items-center gap-2 px-3 py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800 transition-colors text-sm"
+                >
+                  {icons.plus} Add Group
+                </button>
+              </div>
+            </div>
+
+            {state.showAddGroup ? (
+              <div className="p-3 sm:p-4 border-b border-gray-200">
+                <div className="flex flex-wrap items-center gap-3">
+                  <input
+                    type="text"
+                    placeholder="Group Name"
+                    value={state.newGroupName}
+                    onChange={(event) => updateState({ newGroupName: event.target.value })}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') handleAddGroup();
+                      if (event.key === 'Escape') updateState({ showAddGroup: false, newGroupName: '' });
+                    }}
+                    className="flex-1 min-w-[200px] px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500 text-sm"
+                    autoFocus
+                  />
+                  <button
+                    onClick={handleAddGroup}
+                    className="px-4 py-2 bg-violet-600 text-white rounded-lg hover:bg-violet-700 transition-colors text-sm"
+                  >
+                    Add
+                  </button>
+                  <button
+                    onClick={() => updateState({ showAddGroup: false, newGroupName: '' })}
+                    className="p-2 text-gray-500 hover:text-gray-700"
+                  >
+                    {icons.x}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {state.groups.length === 0 ? (
+              <div className="p-8 text-center">
+                <div className="text-4xl mb-3">👥</div>
+                <h3 className="text-lg font-medium text-gray-900 mb-2">No groups created</h3>
+                <p className="text-sm text-gray-500">
+                  Create groups to combine editors and see aggregated views in the charts.
+                </p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="text-left px-3 sm:px-4 py-3 text-xs font-medium text-gray-500 uppercase">Group Name</th>
+                      <th className="text-left px-3 sm:px-4 py-3 text-xs font-medium text-gray-500 uppercase">Editors</th>
+                      <th className="text-center px-3 sm:px-4 py-3 text-xs font-medium text-gray-500 uppercase">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200">
+                    {state.groups.map((group) => (
+                      <tr key={group.id} className="hover:bg-gray-50">
+                        <td className="px-3 sm:px-4 py-3">
+                          {state.editingGroupId === group.id ? (
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="text"
+                                value={state.editingGroupName}
+                                onChange={(event) => updateState({ editingGroupName: event.target.value })}
+                                onKeyDown={(event) => {
+                                  if (event.key === 'Enter') handleSaveGroup(group.id);
+                                  if (event.key === 'Escape') handleCancelEdit();
+                                }}
+                                className="w-32 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                autoFocus
+                              />
+                              <button onClick={() => handleSaveGroup(group.id)} className="p-1 text-green-600 hover:text-green-700">
+                                {icons.check}
+                              </button>
+                              <button onClick={handleCancelEdit} className="p-1 text-gray-400 hover:text-gray-600">
+                                {icons.x}
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="font-medium text-gray-900 text-sm">{group.name}</span>
+                          )}
+                        </td>
+                        <td className="px-3 sm:px-4 py-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            {Array.isArray(group.editors) && group.editors.length > 0 ? (
+                              group.editors.map((e, idx) => (
+                                <span
+                                  key={idx}
+                                  className="inline-flex items-center gap-1 px-2 py-1 bg-violet-100 text-violet-700 rounded-full text-xs"
+                                >
+                                  {e.editor}
+                                  <button
+                                    onClick={() => handleRemoveEditorFromGroup(group.id, e.editor)}
+                                    className="text-violet-600 hover:text-violet-800"
+                                  >
+                                    {icons.x}
+                                  </button>
+                                </span>
+                              ))
+                            ) : (
+                              <span className="text-xs text-gray-400">No editors</span>
+                            )}
+                            {state.selectedGroupId === group.id ? (
+                              <div className="flex items-center gap-1">
+                                <select
+                                  onChange={(event) => {
+                                    if (event.target.value) {
+                                      handleAddEditorToGroup(group.id, event.target.value);
+                                      event.target.value = '';
+                                    }
+                                  }}
+                                  className="px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                  defaultValue=""
+                                >
+                                  <option value="">Add editor...</option>
+                                  {editors
+                                    .filter((editor) => {
+                                      const groupEditors = Array.isArray(group.editors) ? group.editors.map((e) => e.editor) : [];
+                                      return !groupEditors.includes(editor);
+                                    })
+                                    .map((editor) => (
+                                      <option key={editor} value={editor}>
+                                        {editor}
+                                      </option>
+                                    ))}
+                                </select>
+                                <button
+                                  onClick={() => updateState({ selectedGroupId: null })}
+                                  className="p-1 text-gray-400 hover:text-gray-600"
+                                >
+                                  {icons.x}
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => updateState({ selectedGroupId: group.id })}
+                                className="px-2 py-1 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
+                              >
+                                {icons.plus} Add Editor
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-3 sm:px-4 py-3 text-center">
+                          <div className="flex items-center justify-center gap-2">
+                            {state.editingGroupId !== group.id ? (
+                              <>
+                                <button
+                                  onClick={() => handleEditGroup(group.id)}
+                                  className="p-1 text-gray-400 hover:text-violet-600"
+                                  title="Edit group name"
+                                >
+                                  {icons.edit}
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteGroup(group.id)}
+                                  className="p-1 text-gray-400 hover:text-red-500"
+                                  title="Delete group"
+                                >
+                                  {icons.trash}
+                                </button>
+                              </>
+                            ) : null}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               </div>

@@ -10,6 +10,11 @@ export async function PATCH(request, { params }) {
       return NextResponse.json({ error: 'defaultEditor is required' }, { status: 400 });
     }
     await query('UPDATE accounts SET default_editor = $1 WHERE id = $2', [defaultEditor, id]);
+    // Update all videos for this account that don't have editor_override set to true
+    await query(
+      'UPDATE videos SET editor = $1 WHERE account_id = $2 AND editor_override = false',
+      [defaultEditor, id]
+    );
     return NextResponse.json({ ok: true });
   } catch (err) {
     return NextResponse.json({ error: 'Failed to update account' }, { status: 500 });
