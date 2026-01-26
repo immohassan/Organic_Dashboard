@@ -718,6 +718,7 @@ export default function App() {
 
     // Both Instagram and TikTok now use RapidAPI
     const rapidApiKey = process.env.NEXT_PUBLIC_RAPIDAPI_KEY;
+    console.log("rapidApiKey", rapidApiKey)
     
     if (!rapidApiKey) {
       alert('Missing RapidAPI key. Add NEXT_PUBLIC_RAPIDAPI_KEY in .env');
