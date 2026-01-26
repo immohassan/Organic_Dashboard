@@ -6,6 +6,7 @@ const { Pool } = pg;
 
 const databaseUrl = process.env.DATABASE_URL;
 const apifyToken = process.env.NEXT_PUBLIC_APIFY_TOKEN;
+const rapidApiKey = process.env.NEXT_PUBLIC_RAPIDAPI_KEY;
 
 if (!databaseUrl) {
   console.error('Missing DATABASE_URL');
@@ -14,6 +15,11 @@ if (!databaseUrl) {
 
 if (!apifyToken) {
   console.error('Missing NEXT_PUBLIC_APIFY_TOKEN');
+  process.exit(1);
+}
+
+if (!rapidApiKey) {
+  console.error('Missing NEXT_PUBLIC_RAPIDAPI_KEY');
   process.exit(1);
 }
 
@@ -36,57 +42,107 @@ const normalizeInstagramVideoUrl = (url) => {
 };
 
 const fetchAccountVideoUrls = async ({ token, platform, handle, profileUrl }) => {
-  const headers = new Headers();
-  headers.append('Content-Type', 'application/json');
-  headers.append('Accept', 'application/json');
-
   let response;
   if (platform === 'Instagram') {
-    response = await fetch(
-      `https://api.apify.com/v2/acts/xMc5Ga1oCONPmWJIa/run-sync-get-dataset-items?token=${token}`,
-      {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          includeDownloadedVideo: false,
-          includeSharesCount: false,
-          includeTranscript: false,
-          resultsLimit: 500,
-          skipPinnedPosts: false,
-          username: [handle]
-        })
+    // Use RapidAPI for Instagram - returns both URLs and play counts with pagination
+    const rapidApiHeaders = new Headers();
+    rapidApiHeaders.append('Content-Type', 'application/x-www-form-urlencoded');
+    rapidApiHeaders.append('x-rapidapi-host', 'instagram-scraper-stable-api.p.rapidapi.com');
+    rapidApiHeaders.append('x-rapidapi-key', token);
+    
+    const allReels = [];
+    let paginationToken = '';
+    
+    // Fetch all pages until there's no more pagination token
+    do {
+      const formData = new URLSearchParams();
+      formData.append('username_or_url', profileUrl);
+      formData.append('amount', '30');
+      formData.append('pagination_token', paginationToken);
+      
+      response = await fetch(
+        'https://instagram-scraper-stable-api.p.rapidapi.com/get_ig_user_reels.php',
+        {
+          method: 'POST',
+          headers: rapidApiHeaders,
+          body: formData
+        }
+      );
+      
+      if (!response.ok) {
+        throw new Error('RapidAPI request failed');
       }
-    );
+      
+      const data = await response.json();
+      if (data.reels && Array.isArray(data.reels)) {
+        allReels.push(...data.reels);
+      }
+      
+      // Update pagination token for next iteration
+      paginationToken = data.pagination_token || '';
+    } while (paginationToken);
+    
+    // Return objects with url and views for Instagram
+    return allReels.map((reel) => ({
+      url: `https://instagram.com/p/${reel.node.media.code}`,
+      views: reel.node.media.play_count || 0
+    })).filter((item) => item.url);
   } else {
-    response = await fetch(
-      `https://api.apify.com/v2/acts/0FXVyOXXEmdGcV88a/run-sync-get-dataset-items?token=${token}`,
-      {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          excludePinnedPosts: false,
-          profileScrapeSections: ['videos'],
-          profiles: [profileUrl],
-          resultsPerPage: 500,
-          shouldDownloadAvatars: false,
-          shouldDownloadCovers: false,
-          shouldDownloadSlideshowImages: false,
-          shouldDownloadSubtitles: false,
-          shouldDownloadVideos: false
-        })
+    // Use RapidAPI for TikTok - returns both URLs and play counts with pagination
+    const rapidApiHeaders = new Headers();
+    rapidApiHeaders.append('x-rapidapi-host', 'tiktok-scraper7.p.rapidapi.com');
+    rapidApiHeaders.append('x-rapidapi-key', token);
+    
+    const allVideos = [];
+    let cursor = '0';
+    let hasMore = true;
+    
+    // Fetch all pages until there's no more data
+    while (hasMore) {
+      const url = `https://tiktok-scraper7.p.rapidapi.com/user/posts?unique_id=${handle}&count=30&cursor=${cursor}`;
+      
+      response = await fetch(url, {
+        method: 'GET',
+        headers: rapidApiHeaders
+      });
+      
+      if (!response.ok) {
+        throw new Error('RapidAPI TikTok request failed');
       }
-    );
+      
+      const data = await response.json();
+      
+      if (data.data && data.data.videos && Array.isArray(data.data.videos)) {
+        allVideos.push(...data.data.videos);
+      }
+      
+      // Update cursor and hasMore for next iteration
+      cursor = data.data?.cursor || '';
+      hasMore = data.data?.hasMore || false;
+      
+      // Break if no cursor or hasMore is false
+      if (!cursor || !hasMore) {
+        break;
+      }
+    }
+    
+    // Return objects with url and views for TikTok
+    // Note: The API response shows play_count and create_time, but we need aweme_id or video_id for URL
+    return allVideos.map((video) => {
+      // Try to get video ID from various possible fields
+      const videoId = video.aweme_id || video.video_id || video.id || video.awemeId || '';
+      
+      // Construct TikTok video URL if we have an ID
+      const videoUrl = videoId 
+        ? `https://www.tiktok.com/@${handle}/video/${videoId}`
+        : (video.url || video.webVideoUrl || video.share_url || '');
+      
+      return {
+        url: videoUrl,
+        views: video.play_count || 0
+      };
+    }).filter((item) => item.url);
   }
-
-  if (!response.ok) {
-    throw new Error('Apify list failed');
-  }
-  const items = await response.json();
-  if (!Array.isArray(items)) return [];
-  if (platform === 'Instagram') {
-    return items.map((item) => normalizeInstagramVideoUrl(item.url)).filter(Boolean);
-  }
-  return items.map((item) => item.webVideoUrl).filter(Boolean);
 };
 
 const extractInstagramStats = (items) => {
@@ -153,15 +209,16 @@ const refreshAccount = async (account) => {
   console.log(`[${new Date().toISOString()}] Starting refresh for @${account.handle} (${account.platform})`);
   
   try {
-    // Fetch latest video URLs
-    const urls = await fetchAccountVideoUrls({
-      token: apifyToken,
+    // Fetch latest video data (URLs for TikTok, {url, views} objects for Instagram)
+    const token = account.platform === 'Instagram' ? rapidApiKey : apifyToken;
+    const videoData = await fetchAccountVideoUrls({
+      token,
       platform: account.platform,
       handle: account.handle,
       profileUrl: account.url
     });
 
-    if (!urls.length) {
+    if (!videoData.length) {
       console.log(`[${new Date().toISOString()}] No videos found for @${account.handle}`);
       // Update last_refreshed even if no videos found
       await query('UPDATE accounts SET last_refreshed = $1 WHERE id = $2', [new Date(), account.id]);
@@ -174,58 +231,85 @@ const refreshAccount = async (account) => {
 
     const today = new Date().toISOString().split('T')[0];
     const newVideos = [];
-    const allVideos = [];
 
-    // Check for new videos and add them
-    for (const videoUrl of urls) {
-      if (!existingUrls.has(videoUrl)) {
-        // New video - add as placeholder
-        const rows = await query(
-          `INSERT INTO videos (account_id, url, platform, views, posted_date, date_added, editor, editor_override, is_fetching)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-          [account.id, videoUrl, account.platform, 0, null, today, account.default_editor, false, true]
-        );
-        newVideos.push({ id: rows[0].id, url: videoUrl });
-        console.log(`[${new Date().toISOString()}] Added new video: ${videoUrl}`);
+    if (account.platform === 'Instagram') {
+      // For Instagram, videoData is an array of {url, views} objects
+      for (const video of videoData) {
+        if (!existingUrls.has(video.url)) {
+          // New video - add with views already available
+          const rows = await query(
+            `INSERT INTO videos (account_id, url, platform, views, posted_date, date_added, editor, editor_override, is_fetching)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+            [account.id, video.url, account.platform, video.views || 0, null, today, account.default_editor, false, false]
+          );
+          newVideos.push({ id: rows[0].id, url: video.url });
+          console.log(`[${new Date().toISOString()}] Added new video: ${video.url} with ${video.views || 0} views`);
+        } else {
+          // Update existing video with new views
+          await query(
+            'UPDATE videos SET views = $1, is_fetching = $2 WHERE account_id = $3 AND url = $4',
+            [video.views || 0, false, account.id, video.url]
+          );
+          console.log(`[${new Date().toISOString()}] Updated views for ${video.url}: ${video.views || 0}`);
+        }
       }
-      allVideos.push({ url: videoUrl, isNew: !existingUrls.has(videoUrl) });
-    }
+    } else {
+      // For TikTok, videoData is an array of URLs
+      const urls = videoData;
+      
+      // Check for new videos and add them
+      for (const videoUrl of urls) {
+        if (!existingUrls.has(videoUrl)) {
+          // New video - add as placeholder
+          const rows = await query(
+            `INSERT INTO videos (account_id, url, platform, views, posted_date, date_added, editor, editor_override, is_fetching)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+            [account.id, videoUrl, account.platform, 0, null, today, account.default_editor, false, true]
+          );
+          newVideos.push({ id: rows[0].id, url: videoUrl });
+          console.log(`[${new Date().toISOString()}] Added new video: ${videoUrl}`);
+        }
+      }
 
-    // Get all videos for this account (existing + new) to update views
-    const allAccountVideos = await query('SELECT id, url FROM videos WHERE account_id = $1', [account.id]);
+      // Get all videos for this account (existing + new) to update views
+      const allAccountVideos = await query('SELECT id, url FROM videos WHERE account_id = $1', [account.id]);
 
-    // Process videos sequentially to update views
-    for (const video of allAccountVideos) {
-      try {
-        const stats = await fetchVideoStats({ token: apifyToken, url: video.url, platform: account.platform });
-        
-        if (stats.views === null) {
-          // Retry once after 3 seconds
-          await new Promise(resolve => setTimeout(resolve, 3000));
-          const retryStats = await fetchVideoStats({ token: apifyToken, url: video.url, platform: account.platform });
+      // Process videos sequentially to update views
+      for (const video of allAccountVideos) {
+        try {
+          const stats = await fetchVideoStats({ token: apifyToken, url: video.url, platform: account.platform });
           
-          if (retryStats.views === null) {
-            await query('UPDATE videos SET is_fetching = $1 WHERE id = $2', [false, video.id]);
-            console.log(`[${new Date().toISOString()}] Could not fetch views for ${video.url}`);
+          if (stats.views === null) {
+            // Retry once after 3 seconds
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            const retryStats = await fetchVideoStats({ token: apifyToken, url: video.url, platform: account.platform });
+            
+            if (retryStats.views === null) {
+              await query('UPDATE videos SET is_fetching = $1 WHERE id = $2', [false, video.id]);
+              console.log(`[${new Date().toISOString()}] Could not fetch views for ${video.url}`);
+            } else {
+              await query(
+                'UPDATE videos SET views = $1, posted_date = $2, is_fetching = $3 WHERE id = $4',
+                [retryStats.views, retryStats.postedDate || today, false, video.id]
+              );
+              console.log(`[${new Date().toISOString()}] Updated views for ${video.url}: ${retryStats.views}`);
+            }
           } else {
             await query(
               'UPDATE videos SET views = $1, posted_date = $2, is_fetching = $3 WHERE id = $4',
-              [retryStats.views, retryStats.postedDate || today, false, video.id]
+              [stats.views, stats.postedDate || today, false, video.id]
             );
-            console.log(`[${new Date().toISOString()}] Updated views for ${video.url}: ${retryStats.views}`);
+            console.log(`[${new Date().toISOString()}] Updated views for ${video.url}: ${stats.views}`);
           }
-        } else {
-          await query(
-            'UPDATE videos SET views = $1, posted_date = $2, is_fetching = $3 WHERE id = $4',
-            [stats.views, stats.postedDate || today, false, video.id]
-          );
-          console.log(`[${new Date().toISOString()}] Updated views for ${video.url}: ${stats.views}`);
+        } catch (error) {
+          console.error(`[${new Date().toISOString()}] Error fetching stats for ${video.url}:`, error.message);
+          await query('UPDATE videos SET is_fetching = $1 WHERE id = $2', [false, video.id]);
         }
-      } catch (error) {
-        console.error(`[${new Date().toISOString()}] Error fetching stats for ${video.url}:`, error.message);
-        await query('UPDATE videos SET is_fetching = $1 WHERE id = $2', [false, video.id]);
       }
     }
+
+    // Get final count for logging
+    const allAccountVideos = await query('SELECT id FROM videos WHERE account_id = $1', [account.id]);
 
     // Update last_refreshed timestamp
     await query('UPDATE accounts SET last_refreshed = $1 WHERE id = $2', [new Date(), account.id]);

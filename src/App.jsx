@@ -89,13 +89,28 @@ const normalizeInstagramVideoUrl = (url) => {
 };
 
 const fetchVideoStats = async ({ token, url, platform }) => {
-  const headers = new Headers();
-  headers.append('Content-Type', 'application/json');
-  headers.append('Accept', 'application/json');
-
-  let runResponse;
   if (platform === 'Instagram') {
-    runResponse = await fetch(
+    // Extract code from Instagram URL and use RapidAPI
+    const codeMatch = url.match(/instagram\.com\/p\/([a-zA-Z0-9_-]+)/i);
+    if (!codeMatch || !codeMatch[1]) {
+      throw new Error('Invalid Instagram URL');
+    }
+    
+    const rapidApiHeaders = new Headers();
+    rapidApiHeaders.append('Content-Type', 'application/x-www-form-urlencoded');
+    rapidApiHeaders.append('x-rapidapi-host', 'instagram-scraper-stable-api.p.rapidapi.com');
+    rapidApiHeaders.append('x-rapidapi-key', token);
+    
+    // Extract username from URL if possible, otherwise we'll need to use a different approach
+    // For individual videos, we might need to extract the username from the account
+    // For now, we'll try to get the code and construct the URL
+    // Note: The RapidAPI endpoint requires a username, so for individual videos we might need
+    // to keep using Apify or find another endpoint. For now, let's use Apify for individual videos.
+    const headers = new Headers();
+    headers.append('Content-Type', 'application/json');
+    headers.append('Accept', 'application/json');
+    
+    const runResponse = await fetch(
       `https://api.apify.com/v2/acts/wj7yXss2honyonHJ8/run-sync-get-dataset-items?token=${token}`,
       {
         method: 'POST',
@@ -103,8 +118,20 @@ const fetchVideoStats = async ({ token, url, platform }) => {
         body: JSON.stringify({ url: normalizeInstagramVideoUrl(url) })
       }
     );
+    
+    if (!runResponse.ok) {
+      throw new Error('Apify run failed');
+    }
+    
+    const items = await runResponse.json();
+    return extractInstagramStats(items);
   } else {
-    runResponse = await fetch(
+    // TikTok - use Apify
+    const headers = new Headers();
+    headers.append('Content-Type', 'application/json');
+    headers.append('Accept', 'application/json');
+    
+    const runResponse = await fetch(
       `https://api.apify.com/v2/acts/rFfyNgnvUxD1bm8hh/run-sync-get-dataset-items?token=${token}`,
       {
         method: 'POST',
@@ -117,15 +144,14 @@ const fetchVideoStats = async ({ token, url, platform }) => {
         })
       }
     );
-  }
 
-  if (!runResponse.ok) {
-    throw new Error('Apify run failed');
-  }
+    if (!runResponse.ok) {
+      throw new Error('Apify run failed');
+    }
 
-  const items = await runResponse.json();
-  const stats = platform === 'Instagram' ? extractInstagramStats(items) : extractTikTokStats(items);
-  return stats;
+    const items = await runResponse.json();
+    return extractTikTokStats(items);
+  }
 };
 
 const fetchAccountVideoUrls = async ({ token, platform, handle, profileUrl }) => {
@@ -135,51 +161,124 @@ const fetchAccountVideoUrls = async ({ token, platform, handle, profileUrl }) =>
 
   let response;
   if (platform === 'Instagram') {
-    response = await fetch(
-      `https://api.apify.com/v2/acts/xMc5Ga1oCONPmWJIa/run-sync-get-dataset-items?token=${token}`,
-      {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          includeDownloadedVideo: false,
-          includeSharesCount: false,
-          includeTranscript: false,
-          resultsLimit: 500,
-          skipPinnedPosts: false,
-          username: [handle]
-        })
+    // Use RapidAPI for Instagram - returns both URLs and play counts with pagination
+    const rapidApiHeaders = new Headers();
+    rapidApiHeaders.append('Content-Type', 'application/x-www-form-urlencoded');
+    rapidApiHeaders.append('x-rapidapi-host', 'instagram-scraper-stable-api.p.rapidapi.com');
+    rapidApiHeaders.append('x-rapidapi-key', token);
+    
+    const allReels = [];
+    let paginationToken = '';
+    
+    // Fetch all pages until there's no more pagination token
+    do {
+      const formData = new URLSearchParams();
+      formData.append('username_or_url', profileUrl);
+      formData.append('amount', '30');
+      formData.append('pagination_token', paginationToken);
+      
+      response = await fetch(
+        'https://instagram-scraper-stable-api.p.rapidapi.com/get_ig_user_reels.php',
+        {
+          method: 'POST',
+          headers: rapidApiHeaders,
+          body: formData
+        }
+      );
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Instagram API error:', response.status, errorText);
+        throw new Error(`RapidAPI Instagram request failed: ${response.status} ${errorText}`);
       }
-    );
+      
+      const data = await response.json();
+      
+      // Check for API error in response
+      if (data.error || data.message) {
+        throw new Error(data.error || data.message || 'Instagram API returned an error');
+      }
+      
+      if (data.reels && Array.isArray(data.reels)) {
+        allReels.push(...data.reels);
+      }
+      
+      // Update pagination token for next iteration
+      paginationToken = data.pagination_token || '';
+    } while (paginationToken);
+    
+    // Return objects with url and views for Instagram
+    return allReels.map((reel) => ({
+      url: `https://instagram.com/p/${reel.node.media.code}`,
+      views: reel.node.media.play_count || 0
+    })).filter((item) => item.url);
   } else {
-    response = await fetch(
-      `https://api.apify.com/v2/acts/0FXVyOXXEmdGcV88a/run-sync-get-dataset-items?token=${token}`,
-      {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          excludePinnedPosts: false,
-          profileScrapeSections: ['videos'],
-          profiles: [profileUrl],
-          resultsPerPage: 500,
-          shouldDownloadAvatars: false,
-          shouldDownloadCovers: false,
-          shouldDownloadSlideshowImages: false,
-          shouldDownloadSubtitles: false,
-          shouldDownloadVideos: false
-        })
+    // Use RapidAPI for TikTok - returns both URLs and play counts with pagination
+    const rapidApiHeaders = new Headers();
+    rapidApiHeaders.append('x-rapidapi-host', 'tiktok-scraper7.p.rapidapi.com');
+    rapidApiHeaders.append('x-rapidapi-key', token);
+    
+    const allVideos = [];
+    let cursor = '0';
+    let hasMore = true;
+    
+    // Fetch all pages until there's no more data
+    while (hasMore) {
+      const url = `https://tiktok-scraper7.p.rapidapi.com/user/posts?unique_id=${handle}&count=30&cursor=${cursor}`;
+      
+      response = await fetch(url, {
+        method: 'GET',
+        headers: rapidApiHeaders
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('TikTok API error:', response.status, errorText);
+        throw new Error(`RapidAPI TikTok request failed: ${response.status} ${errorText}`);
       }
-    );
+      
+      const data = await response.json();
+      
+      // Check for API error in response
+      if (data.error || data.message) {
+        throw new Error(data.error || data.message || 'TikTok API returned an error');
+      }
+      
+      if (data.data && data.data.videos && Array.isArray(data.data.videos)) {
+        allVideos.push(...data.data.videos);
+      }
+      
+      // Update cursor and hasMore for next iteration
+      cursor = data.data?.cursor || '';
+      hasMore = data.data?.hasMore || false;
+      
+      // Break if no cursor or hasMore is false
+      if (!cursor || !hasMore) {
+        break;
+      }
+    }
+    
+    // Return objects with url and views for TikTok
+    // Note: The API response shows play_count and create_time, but we need aweme_id or video_id for URL
+    // Check for common fields that might contain the video identifier
+    return allVideos.map((video) => {
+      // Try to get video ID from various possible fields
+      const videoId = video.aweme_id || video.video_id || video.id || video.awemeId || '';
+      
+      // Construct TikTok video URL if we have an ID
+      // If no ID is available, we might need to use create_time or another method
+      // For now, construct URL if we have an ID, otherwise return empty URL
+      const videoUrl = videoId 
+        ? `https://www.tiktok.com/@${handle}/video/${videoId}`
+        : (video.url || video.webVideoUrl || video.share_url || '');
+      
+      return {
+        url: videoUrl,
+        views: video.play_count || 0,
+        postedDate: video.create_time || ''
+      };
+    }).filter((item) => item.url);
   }
-
-  if (!response.ok) {
-    throw new Error('Apify list failed');
-  }
-  const items = await response.json();
-  if (!Array.isArray(items)) return [];
-  if (platform === 'Instagram') {
-    return items.map((item) => normalizeInstagramVideoUrl(item.url)).filter(Boolean);
-  }
-  return items.map((item) => item.webVideoUrl).filter(Boolean);
 };
 
 const icons = {
@@ -617,9 +716,11 @@ export default function App() {
       return;
     }
 
-    const token = process.env.NEXT_PUBLIC_APIFY_TOKEN;
-    if (!token) {
-      alert('Missing Apify token. Add NEXT_PUBLIC_APIFY_TOKEN in .env');
+    // Both Instagram and TikTok now use RapidAPI
+    const rapidApiKey = process.env.NEXT_PUBLIC_RAPIDAPI_KEY;
+    
+    if (!rapidApiKey) {
+      alert('Missing RapidAPI key. Add NEXT_PUBLIC_RAPIDAPI_KEY in .env');
       return;
     }
 
@@ -773,9 +874,11 @@ export default function App() {
       return;
     }
 
-    const token = process.env.NEXT_PUBLIC_APIFY_TOKEN;
-    if (!token) {
-      alert('Missing Apify token. Add NEXT_PUBLIC_APIFY_TOKEN in .env');
+    // Both Instagram and TikTok now use RapidAPI
+    const rapidApiKey = process.env.NEXT_PUBLIC_RAPIDAPI_KEY;
+    
+    if (!rapidApiKey) {
+      alert('Missing RapidAPI key. Add NEXT_PUBLIC_RAPIDAPI_KEY in .env');
       return;
     }
 
@@ -783,157 +886,79 @@ export default function App() {
     updateState({ selectedAccountId: accountId, activeTab: 'accountVideos' });
 
     try {
-      const urls = await fetchAccountVideoUrls({
-        token,
+      const videoData = await fetchAccountVideoUrls({
+        token: rapidApiKey,
         platform: parsed.platform,
         handle: parsed.handle,
         profileUrl: urlInput
       });
-      if (!urls.length) {
+      if (!videoData || !videoData.length) {
         updateState({ toast: { type: 'error', message: 'No videos found for this account.' } });
         setTimeout(() => updateState({ toast: null }), 2500);
         return;
       }
 
       const today = new Date().toISOString().split('T')[0];
-      updateState({ toast: { type: 'loading', message: `Adding ${urls.length} videos...` } });
       
-      // Step 1: Create all placeholder videos immediately so they show in the table
-      const placeholders = [];
-      const newVideos = [];
-      
-      for (const videoUrl of urls) {
-        const created = await fetch(`${API_BASE}/api/videos`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            accountId,
-            url: videoUrl,
-            platform: parsed.platform,
-            views: 0,
-            postedDate: null,
-            dateAdded: today,
-            editor: editorInput,
-            editorOverride: false,
-            isFetching: true
-          })
-        });
-        if (!created.ok) {
-          continue;
-        }
-        const createdData = await created.json();
-        const videoPlaceholder = {
-          id: createdData?.id,
-          accountId,
-          url: videoUrl,
-          platform: parsed.platform,
-          views: 0,
-          postedDate: '',
-          dateAdded: today,
-          editor: editorInput,
-          editorOverride: false,
-          isFetching: true
-        };
-        placeholders.push({ id: createdData?.id, url: videoUrl });
-        newVideos.push(videoPlaceholder);
-      }
-      
-      // Add all new videos to state at once so they appear immediately
-      if (newVideos.length > 0) {
-        updateState((prev) => ({
-          ...prev,
-          videos: [...newVideos, ...prev.videos]
-        }));
-      }
-
-      // Step 2: Process videos one at a time, retry if result is empty
-      let processed = 0;
-      const totalVideos = placeholders.length;
-
-      // Helper function to fetch stats for a single video with retry logic
-      const fetchVideoStatsAndUpdate = async (placeholder, retryCount = 0) => {
-        try {
-          const stats = await fetchVideoStats({ token, url: placeholder.url, platform: parsed.platform });
-          
-          if (stats.views === null) {
-            // If result is empty and we haven't retried yet, wait 3s and retry
-            if (retryCount === 0) {
-              updateState({ toast: { type: 'loading', message: `Empty result for video ${processed + 1}/${totalVideos}, retrying in 3s...` } });
-              await new Promise(resolve => setTimeout(resolve, 3000));
-              return fetchVideoStatsAndUpdate(placeholder, 1);
-            }
-            
-            // After retry, if still empty, mark as done
-            await fetch(`${API_BASE}/api/videos/${placeholder.id}`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ isFetching: false })
-            });
-            updateState((prev) => ({
-              ...prev,
-              videos: prev.videos.map((video) =>
-                video.id === placeholder.id
-                  ? { ...video, isFetching: false }
-                  : video
-              )
-            }));
-          } else {
-            // Success - update with stats
-            await fetch(`${API_BASE}/api/videos/${placeholder.id}`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                views: stats.views,
-                postedDate: stats.postedDate || today,
-                isFetching: false
-              })
-            });
-            updateState((prev) => ({
-              ...prev,
-              videos: prev.videos.map((video) =>
-                video.id === placeholder.id
-                  ? { ...video, views: stats.views, postedDate: stats.postedDate || today, isFetching: false }
-                  : video
-              )
-            }));
-          }
-          return true;
-        } catch (error) {
-          console.error(`Error fetching stats for video ${placeholder.id}:`, error);
-          // Mark as not fetching on error
-          await fetch(`${API_BASE}/api/videos/${placeholder.id}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ isFetching: false })
-          });
-          updateState((prev) => ({
-            ...prev,
-            videos: prev.videos.map((video) =>
-              video.id === placeholder.id
-                ? { ...video, isFetching: false }
-                : video
-            )
-          }));
-          return false;
-        }
-      };
-
-      // Process videos one at a time sequentially
-      if (placeholders.length > 0) {
-        updateState({ toast: { type: 'loading', message: `Fetching views for ${totalVideos} videos...` } });
+      if (parsed.platform === 'Instagram') {
+        // For Instagram, we already have views from RapidAPI, so create videos directly
+        updateState({ toast: { type: 'loading', message: `Adding ${videoData.length} Instagram videos...` } });
         
-        for (const placeholder of placeholders) {
-          await fetchVideoStatsAndUpdate(placeholder);
-          processed += 1;
-          updateState({ toast: { type: 'loading', message: `Fetching views... ${processed}/${totalVideos} complete` } });
+        for (const video of videoData) {
+          await fetch(`${API_BASE}/api/videos`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              accountId,
+              url: video.url,
+              platform: parsed.platform,
+              views: video.views || 0,
+              postedDate: null,
+              dateAdded: today,
+              editor: editorInput,
+              editorOverride: false,
+              isFetching: false
+            })
+          });
         }
+        
+        // Refresh videos list
+        const videosRes = await fetch(`${API_BASE}/api/videos`);
+        const videos = await videosRes.json();
+        updateState({ videos, toast: { type: 'success', message: `Added ${videoData.length} Instagram videos.` } });
+        setTimeout(() => updateState({ toast: null }), 2000);
+      } else {
+        // For TikTok, we already have views from RapidAPI, so create videos directly
+        updateState({ toast: { type: 'loading', message: `Adding ${videoData.length} TikTok videos...` } });
+        
+        for (const video of videoData) {
+          await fetch(`${API_BASE}/api/videos`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              accountId,
+              url: video.url,
+              platform: parsed.platform,
+              views: video.views || 0,
+              postedDate: null,
+              dateAdded: today,
+              editor: editorInput,
+              editorOverride: false,
+              isFetching: false
+            })
+          });
+        }
+        
+        // Refresh videos list
+        const videosRes = await fetch(`${API_BASE}/api/videos`);
+        const videos = await videosRes.json();
+        updateState({ videos, toast: { type: 'success', message: `Added ${videoData.length} TikTok videos.` } });
+        setTimeout(() => updateState({ toast: null }), 2000);
       }
-
-      updateState({ toast: { type: 'success', message: `Fetched ${urls.length} videos.` } });
-      setTimeout(() => updateState({ toast: null }), 2000);
     } catch (e) {
       console.error('Account fetch failed', e);
-      updateState({ toast: { type: 'error', message: 'Failed to fetch account videos.' } });
+      const errorMessage = e.message || 'Failed to fetch account videos.';
+      updateState({ toast: { type: 'error', message: errorMessage } });
       setTimeout(() => updateState({ toast: null }), 2500);
     }
     updateState({
