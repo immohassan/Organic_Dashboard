@@ -207,11 +207,16 @@ const fetchAccountVideoUrls = async ({ token, platform, handle, profileUrl }) =>
       paginationToken = data.pagination_token || '';
     } while (paginationToken);
     
-    // Return objects with url and views for Instagram
-    return allReels.map((reel) => ({
-      url: `https://instagram.com/p/${reel.node.media.code}`,
-      views: reel.node.media.play_count || 0
-    })).filter((item) => item.url);
+    // Return objects with url, views, and postedDate for Instagram
+    return allReels.map((reel) => {
+      const takenAt = reel.node.media.taken_at_timestamp || reel.node.media.taken_at || null;
+      const postedDate = takenAt ? new Date(takenAt * 1000).toISOString().split('T')[0] : '';
+      return {
+        url: `https://instagram.com/p/${reel.node.media.code}`,
+        views: reel.node.media.play_count || 0,
+        postedDate
+      };
+    }).filter((item) => item.url);
   } else {
     // Use RapidAPI for TikTok - returns both URLs and play counts with pagination
     const rapidApiHeaders = new Headers();
@@ -275,7 +280,7 @@ const fetchAccountVideoUrls = async ({ token, platform, handle, profileUrl }) =>
       return {
         url: videoUrl,
         views: video.play_count || 0,
-        postedDate: video.create_time || ''
+        postedDate: video.create_time ? new Date(video.create_time * 1000).toISOString().split('T')[0] : ''
       };
     }).filter((item) => item.url);
   }
@@ -420,7 +425,8 @@ export default function App() {
     newGroupName: '',
     showAddGroup: false,
     selectedGroupId: null,
-    toast: null
+    toast: null,
+    initialLoading: true
   });
 
   const updateState = (updates) => {
@@ -452,9 +458,11 @@ export default function App() {
           settings,
           accounts,
           videos,
-          groups
+          groups,
+          initialLoading: false
         });
       } catch (e) {
+        updateState({ initialLoading: false });
         alert('Failed to load data from API.');
       }
     };
@@ -901,61 +909,32 @@ export default function App() {
 
       const today = new Date().toISOString().split('T')[0];
       
-      if (parsed.platform === 'Instagram') {
-        // For Instagram, we already have views from RapidAPI, so create videos directly
-        updateState({ toast: { type: 'loading', message: `Adding ${videoData.length} Instagram videos...` } });
-        
-        for (const video of videoData) {
-          await fetch(`${API_BASE}/api/videos`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              accountId,
-              url: video.url,
-              platform: parsed.platform,
-              views: video.views || 0,
-              postedDate: null,
-              dateAdded: today,
-              editor: editorInput,
-              editorOverride: false,
-              isFetching: false
-            })
-          });
-        }
-        
-        // Refresh videos list
-        const videosRes = await fetch(`${API_BASE}/api/videos`);
-        const videos = await videosRes.json();
-        updateState({ videos, toast: { type: 'success', message: `Added ${videoData.length} Instagram videos.` } });
-        setTimeout(() => updateState({ toast: null }), 2000);
-      } else {
-        // For TikTok, we already have views from RapidAPI, so create videos directly
-        updateState({ toast: { type: 'loading', message: `Adding ${videoData.length} TikTok videos...` } });
-        
-        for (const video of videoData) {
-          await fetch(`${API_BASE}/api/videos`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              accountId,
-              url: video.url,
-              platform: parsed.platform,
-              views: video.views || 0,
-              postedDate: null,
-              dateAdded: today,
-              editor: editorInput,
-              editorOverride: false,
-              isFetching: false
-            })
-          });
-        }
-        
-        // Refresh videos list
-        const videosRes = await fetch(`${API_BASE}/api/videos`);
-        const videos = await videosRes.json();
-        updateState({ videos, toast: { type: 'success', message: `Added ${videoData.length} TikTok videos.` } });
-        setTimeout(() => updateState({ toast: null }), 2000);
+      const platformLabel = parsed.platform === 'Instagram' ? 'Instagram' : 'TikTok';
+      updateState({ toast: { type: 'loading', message: `Adding ${videoData.length} ${platformLabel} videos...` } });
+
+      for (const video of videoData) {
+        await fetch(`${API_BASE}/api/videos`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            accountId,
+            url: video.url,
+            platform: parsed.platform,
+            views: video.views || 0,
+            postedDate: video.postedDate || null,
+            dateAdded: today,
+            editor: editorInput,
+            editorOverride: false,
+            isFetching: false
+          })
+        });
       }
+
+      // Refresh videos list
+      const videosRes = await fetch(`${API_BASE}/api/videos`);
+      const videos = await videosRes.json();
+      updateState({ videos, toast: { type: 'success', message: `Added ${videoData.length} ${platformLabel} videos.` } });
+      setTimeout(() => updateState({ toast: null }), 2000);
     } catch (e) {
       console.error('Account fetch failed', e);
       const errorMessage = e.message || 'Failed to fetch account videos.';
@@ -1167,6 +1146,17 @@ export default function App() {
   const handleCancelLogin = () => {
     updateState({ showLoginModal: false, loginCode: '' });
   };
+
+  if (state.initialLoading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin inline-block mb-4 text-violet-600">{icons.refresh}</div>
+          <p className="text-sm text-gray-500">Loading dashboard...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -1751,7 +1741,7 @@ export default function App() {
                           </a>
                         </td>
                         <td className="px-3 sm:px-4 py-3 text-xs sm:text-sm text-gray-600 whitespace-nowrap">
-                          {new Date(video.postedDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                          {new Date(video.postedDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                         </td>
                         <td className="px-3 sm:px-4 py-3 text-right">
                           {state.editingVideoId === video.id ? (
@@ -1962,9 +1952,9 @@ export default function App() {
                             {/* Fetching... */}
                           </span>
                         ) : video.postedDate ? (
-                          new Date(video.postedDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+                          new Date(video.postedDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
                         ) : video.dateAdded ? (
-                          new Date(video.dateAdded).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+                          new Date(video.dateAdded).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
                         ) : (
                           '—'
                         )}
